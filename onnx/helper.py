@@ -794,18 +794,34 @@ def make_empty_tensor_value_info(name: str) -> ValueInfoProto:
     return value_info_proto
 
 
-def make_tensor_type_proto(
+def _fill_tensor_type(
+    tensor_type_proto: TypeProto.Tensor,
     elem_type: int,
     shape: Sequence[str | int | None] | None,
-    shape_denotation: list[str] | None = None,
-) -> TypeProto:
-    """Makes a Tensor TypeProto based on the data type and shape."""
-    type_proto = TypeProto()
-    tensor_type_proto = type_proto.tensor_type
+    shape_denotation: list[str] | None,
+) -> None:
+    """Fills a TypeProto.Tensor in place based on the data type and shape."""
     tensor_type_proto.elem_type = elem_type
-    tensor_shape_proto = tensor_type_proto.shape
+    if shape is None:
+        return
 
-    if shape is not None:
+    if shape_denotation and len(shape_denotation) != len(shape):
+        raise ValueError(
+            "Invalid shape_denotation. Must be of the same length as shape."
+        )
+
+    dims = tensor_type_proto.shape.dim
+    for d in shape:
+        if isinstance(d, int):
+            dims.add(dim_value=d)
+        elif isinstance(d, str):
+            dims.add(dim_param=d)
+        elif d is None:
+            dims.add()
+        else:
+            raise ValueError(f"Invalid item in shape: {d}. Needs to be of int or str.")
+
+    if not dims:
         # You might think this is a no-op (extending a normal Python
         # list by [] certainly is), but protobuf lists work a little
         # differently; if a field is never set, it is omitted from the
@@ -813,29 +829,20 @@ def make_tensor_type_proto(
         # empty will get an (empty) entry in the protobuf. This
         # difference is visible to our consumers, so make sure we emit
         # an empty shape!
-        tensor_shape_proto.dim.extend([])
+        dims.extend([])
+    elif shape_denotation:
+        for dim, denotation in zip(dims, shape_denotation, strict=True):
+            dim.denotation = denotation
 
-        if shape_denotation and len(shape_denotation) != len(shape):
-            raise ValueError(
-                "Invalid shape_denotation. Must be of the same length as shape."
-            )
 
-        for i, d in enumerate(shape):
-            dim = tensor_shape_proto.dim.add()
-            if d is None:
-                pass
-            elif isinstance(d, int):
-                dim.dim_value = d
-            elif isinstance(d, str):
-                dim.dim_param = d
-            else:
-                raise ValueError(
-                    f"Invalid item in shape: {d}. Needs to be of int or str."
-                )
-
-            if shape_denotation:
-                dim.denotation = shape_denotation[i]
-
+def make_tensor_type_proto(
+    elem_type: int,
+    shape: Sequence[str | int | None] | None,
+    shape_denotation: list[str] | None = None,
+) -> TypeProto:
+    """Makes a Tensor TypeProto based on the data type and shape."""
+    type_proto = TypeProto()
+    _fill_tensor_type(type_proto.tensor_type, elem_type, shape, shape_denotation)
     return type_proto
 
 
@@ -852,8 +859,9 @@ def make_tensor_value_info(
     if doc_string:
         value_info_proto.doc_string = doc_string
 
-    tensor_type_proto = make_tensor_type_proto(elem_type, shape, shape_denotation)
-    value_info_proto.type.CopyFrom(tensor_type_proto)
+    _fill_tensor_type(
+        value_info_proto.type.tensor_type, elem_type, shape, shape_denotation
+    )
     return value_info_proto
 
 

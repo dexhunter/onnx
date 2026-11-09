@@ -614,36 +614,45 @@ class ReferenceEvaluator:
             bindings = SymbolBindings() if do_check_shapes else None
 
         # step 1: inputs and initializers
-        results = {"": None}  # optional input
-        results.update(self.rt_inits_)  # type: ignore[arg-type]
+        results = {"": None, **self.rt_inits_}  # "" is an optional input
         results.update(feed_inputs)
-        for k, v in self.rt_inits_.items():
-            self._log(2, " +C %s: %s", k, v)  # type: ignore[arg-type]
-        for k, v in feed_inputs.items():
-            self._log(2, " +I %s: %s", k, v)  # type: ignore[arg-type]
+        # Logging arguments are only built when they would be printed
+        # (see `_log`: a message is printed if its level < verbose).
+        log_nodes = self.verbose > 1
+        log_values = self.verbose > 2  # noqa: PLR2004
+        if log_values:
+            for k, v in self.rt_inits_.items():
+                self._log(2, " +C %s: %s", k, v)  # type: ignore[arg-type]
+            for k, v in feed_inputs.items():
+                self._log(2, " +I %s: %s", k, v)  # type: ignore[arg-type]
 
-        if bindings is not None:
+        all_types = self.all_types_ if bindings is not None else None
+        if all_types:
             # Check every annotated value already available at entry,
             # including initializer-only values and values captured from an
             # enclosing graph.
-            if self.all_types_:
-                for name, value in results.items():
-                    if name in self.all_types_:
-                        check_value_against_type(
-                            self.all_types_[name], value, bindings, name
-                        )
+            for name, value in results.items():
+                if name in all_types:
+                    check_value_against_type(all_types[name], value, bindings, name)
+
+        # Outputs only need a second pass when they are logged or checked.
+        visit_outputs = log_values or bool(all_types)
 
         # step 2: execute nodes
         for node in self.rt_nodes_:
-            self._log(1, "%s(%s) -> %s", node.op_type, node.input, node.output)
-            for i in node.input:
-                if i not in results:
-                    raise RuntimeError(
-                        f"Unable to find input {i!r} in known results {sorted(results)}, "
-                        f"self.rt_inits_ has {sorted(self.rt_inits_)}, "
-                        f"feed_inputs has {sorted(feed_inputs)}."
-                    )
-            inputs = [results[i] for i in node.input]
+            node_input = node.input
+            node_output = node.output
+            if log_nodes:
+                self._log(1, "%s(%s) -> %s", node.op_type, node_input, node_output)
+            try:
+                inputs = [results[i] for i in node_input]
+            except KeyError:
+                missing = next(i for i in node_input if i not in results)
+                raise RuntimeError(
+                    f"Unable to find input {missing!r} in known results {sorted(results)}, "
+                    f"self.rt_inits_ has {sorted(self.rt_inits_)}, "
+                    f"feed_inputs has {sorted(feed_inputs)}."
+                ) from None
             linked_attributes = {}
             if node.has_linked_attribute and attributes:
                 linked_attributes["linked_attributes"] = attributes
@@ -662,13 +671,19 @@ class ReferenceEvaluator:
                 outputs = node.run(*inputs, bindings=bindings, **linked_attributes)
             else:
                 outputs = node.run(*inputs, **linked_attributes)
-            for name, value in zip(node.output, outputs, strict=False):
-                self._log(2, " + %s: %s", name, value)  # type: ignore[arg-type]
-                results[name] = value
-                if bindings is not None and self.all_types_:
-                    check_value_against_type(
-                        self.all_types_.get(name), value, bindings, name
-                    )
+            if visit_outputs:
+                # Iterated twice below, once to store and once to log/check.
+                outputs = tuple(outputs)
+            # Store all outputs at once, then log and check them in order.
+            results.update(zip(node_output, outputs, strict=False))
+            if visit_outputs:
+                for name, value in zip(node_output, outputs, strict=False):
+                    if log_values:
+                        self._log(2, " + %s: %s", name, value)  # type: ignore[arg-type]
+                    if all_types:
+                        check_value_against_type(
+                            all_types.get(name), value, bindings, name
+                        )
 
         if bindings is not None:
             # See the comment above the input check: a FunctionProto's
